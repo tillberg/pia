@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Personal Internet Archive",
+  "description": "Records a personal history of the observed web.",
+  "version": "1.1",
+  "devtools_page": "devtools_pia.html",
+  "permissions": [
+    "tabs",
+    "webRequest",
+    "webRequestBlocking",
+    "<all_urls>",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  }
+}
