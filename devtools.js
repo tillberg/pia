@@ -21,23 +21,21 @@ function calcHash(bytes) {
   var hash = shaObj.getHash("SHA-1", "BYTES"); // SHA-256 is much slower
   var elapsed = Date.now() - start;
   totalHashTime += elapsed;
-  return hash;
   // log('hash of ' + bytes.length + ' bytes took ' + elapsed + 'ms');
+  return hash;
 }
 
 function queueUpload(bytes, cb) {
   var hash = calcHash(bytes);
-  log('queueing upload of ' + btoa(hash) + ' - ' + bytes.length + ' bytes.');
+  // log('queueing upload of ' + btoa(hash) + ' - ' + bytes.length + ' bytes.');
   // queue upload if necessary
-  setTimeout(function() {
-    cb(hash);
-  }, 0);
+  cb(hash);
 }
 
 function uploadBytes(bytes, cb) {
   if (bytes.length > chunkLength) {
     var chunks = [];
-    function nextChunk() {
+    function nextChunk(done) {
       var n = chunks.length;
       var start = n * chunkLength;
       if (start < bytes.length) {
@@ -45,29 +43,90 @@ function uploadBytes(bytes, cb) {
         // log(start);
         queueUpload(chunk, function(hash) {
           chunks.push(hash);
-          setTimeout(nextChunk, 0);
+          queueOnIdle(nextChunk);
+          done();
         });
       } else {
         var chunkData = bcatPrefix + chunks.join('');
         uploadBytes(chunkData, cb);
+        done();
       }
     }
-    setTimeout(nextChunk, 0);
+    queueOnIdle(nextChunk);
   } else {
     queueUpload(bytes, cb);
   }
 }
 
+var nextId = 1;
 
-chrome.devtools.network.onRequestFinished.addListener(function(request) {
-  var finishTime = new Date().getTime();
-  // log('request', request);
+var idleCallbacks = [];
+
+var idlenessCheckerTimeout;
+var idleCheckCount = 0;
+var _isIdle = false;
+
+var idleTimerMs = 50;
+var idleThresholdMs = 100;
+var idleThresholdCount = 20;
+var idlenessCheckerLastTime = 0;
+var idleTaskRunning = false;
+
+function callIdleTask() {
+  if (idleCallbacks.length) {
+    var start = Date.now();
+    idleTaskRunning = true;
+    var taskFn = idleCallbacks.shift();
+    // log('running task: ' + taskFn);
+    taskFn(function onIdleTaskDone() {
+      // log('task took ' + (Date.now() - start) + 'ms');
+      idleTaskRunning = false;
+      ensureIdlenessCheckerTimeout();
+    });
+  } else {
+    // log('idle queue empty');
+  }
+}
+
+function ensureIdlenessCheckerTimeout() {
+  if (!idlenessCheckerTimeout && !idleTaskRunning) {
+    var now = Date.now();
+    var delay = Math.max(0, idleTimerMs - (now - idlenessCheckerLastTime));
+    // log('delay: ' + delay);
+    idlenessCheckerTimeout = setTimeout(idlenessChecker, delay);
+  }
+}
+
+function idlenessChecker() {
+  idlenessCheckerTimeout = null;
+  var now = Date.now();
+
+  if (now - idlenessCheckerLastTime < idleThresholdMs) {
+    idleCheckCount++;
+  } else {
+    idleCheckCount = 0;
+  }
+  // log('delta: ' + (now - idlenessCheckerLastTime) + ', idleCheckCount: '+ idleCheckCount);
+  idlenessCheckerLastTime = now;
+  if (idleCheckCount >= idleThresholdCount) {
+    _isIdle = true;
+    callIdleTask();
+    return;
+  }
+  ensureIdlenessCheckerTimeout();
+}
+
+function queueOnIdle(cb) {
+  idleCallbacks.push(cb);
+  ensureIdlenessCheckerTimeout();
+}
+
+function requestContent(request, done) {
+  var start = Date.now();
   request.getContent(function getContent(content, encoding) {
-    var envelope;
-    var parts = [];
-    var bytes = encoding === 'base64' ? atob(content) : content;
-    // log(request.request.url + ' is ' + bytes.length + ' bytes');
-    uploadBytes(blobPrefix + bytes, function(hash) {
+    var bytes = content != null && encoding === 'base64' ? atob(content) : content;
+    // log(request.request.url + ' (' + (bytes && bytes.length) + ' bytes) getContent took ' + (Date.now() - start) + 'ms');
+    function sendEvent(sha1) {
       var ev = {
         url: request.request.url,
         method: request.request.method,
@@ -75,12 +134,31 @@ chrome.devtools.network.onRequestFinished.addListener(function(request) {
         status: request.response.status,
         latency: Math.round(request.time),
         startTime: new Date(request.startedDateTime).getTime(),
-        sha1: btoa(hash),
       };
-      log(ev);
-      log('totalHashTime: ' + totalHashTime);
-    });
+      if (sha1) {
+        ev.sha1 = sha1;
+      }
+      // log(ev);
+    }
+    done();
+    if (bytes != null) {
+      queueOnIdle(function(done) {
+        done();
+        uploadBytes(blobPrefix + bytes, function(sha1) {
+          // log('totalHashTime: ' + totalHashTime);
+          sendEvent(sha1);
+        });
+      })
+    } else {
+      sendEvent(null);
+    }
   });
+}
+
+chrome.devtools.network.onRequestFinished.addListener(function(request) {
+  // Process the request after a delay so as to avoid causing delays during
+  // page load/render.
+  queueOnIdle(requestContent.bind(null, request));
 });
 
 chrome.devtools.network.onNavigated.addListener(function onNavigated(url) {
