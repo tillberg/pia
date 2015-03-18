@@ -1,3 +1,32 @@
+
+var port;
+function onDisconnect() {
+  port = null;
+}
+function onMessage(ev) {
+  if (ev.type === 'check_sha1') {
+    var sha1 = ev.sha1;
+    if (hashCheckQueue[sha1] != null) {
+      if (!ev.isHit) {
+        uploadQueue[sha1] = hashCheckQueue[sha1];
+        ensureUploaderTimeout();
+      }
+      delete hashCheckQueue[sha1];
+    }
+  } else {
+    log('unknown event type: ' + ev.type);
+  }
+}
+function postMessage(msg) {
+  if (!port) {
+    port = chrome.runtime.connect({name: "devtools-page"});
+    port.onMessage.addListener(onMessage);
+    port.onDisconnect.addListener(onDisconnect);
+  }
+  // How do we know that msg gets received?
+  port.postMessage(msg);
+}
+
 function log() {
   var strings = [].map.call(arguments, function(arg) {
     return 'JSON.parse(unescape("' + escape(JSON.stringify(arg)) + '"))';
@@ -6,7 +35,7 @@ function log() {
 }
 
 var blobPrefix = 'blob\0';
-var bcatPrefix = 'cat1\0'; // cat2 would be sha256, I guess?
+var bcatPrefix = 'cat1\0'; // cat2 would/will maybe be sha256, I guess?
 var prefixLength = 5;
 
 var hashPrefix = 'PIA1:';
@@ -25,11 +54,67 @@ function calcHash(bytes) {
   return hash;
 }
 
+var uploadQueue = {};
+var hashCheckQueue = {};
+
+var uploaderTimeout;
+function uploader() {
+  uploaderTimeout = null;
+  var sha1;
+  for (var _sha1 in uploadQueue) {
+    sha1 = _sha1;
+    ensureUploaderTimeout();
+    break;
+  }
+  if (sha1) {
+    // XXX do something to verify receipt?
+    var bytes = uploadQueue[sha1];
+    log('uploading ' + btoa(sha1) + ' (' + (bytes ? bytes.length : 'null') + ' bytes)');
+    postMessage({
+      type: 'upload',
+      sha1: sha1,
+      bytes: bytes,
+    });
+    delete uploadQueue[sha1];
+  }
+}
+function ensureUploaderTimeout() {
+  if (!uploaderTimeout) {
+    uploaderTimeout = setTimeout(uploader, 1);
+  }
+}
+
+// This serves to clean up any hashes where we for one reason or another
+// might miss the check_sha1 response for a request we made:
+var hashCheckerTimeout;
+function hashChecker() {
+  hashCheckerTimeout = null;
+  for (var sha1 in hashCheckQueue) {
+    sendHashCheck(sha1);
+    ensureHashCheckerTimeout();
+  }
+}
+function ensureHashCheckerTimeout() {
+  if (!hashCheckerTimeout) {
+    hashCheckerTimeout = setTimeout(hashChecker, 1000);
+  }
+}
+
+function sendHashCheck(sha1) {
+  // log('check_sha1 ' + btoa(sha1));
+  postMessage({
+    type: 'check_sha1',
+    sha1: sha1,
+  });
+}
+
 function queueUpload(bytes, cb) {
-  var hash = calcHash(bytes);
+  var sha1 = calcHash(bytes);
   // log('queueing upload of ' + btoa(hash) + ' - ' + bytes.length + ' bytes.');
-  // queue upload if necessary
-  cb(hash);
+  hashCheckQueue[sha1] = bytes;
+  sendHashCheck(sha1);
+  ensureHashCheckerTimeout();
+  cb(sha1);
 }
 
 function uploadBytes(bytes, cb) {
@@ -66,7 +151,7 @@ var idlenessCheckerTimeout;
 var idleCheckCount = 0;
 var _isIdle = false;
 
-var idleTimerMs = 50;
+var idleTimerMs = 0;//50;
 var idleThresholdMs = 100;
 var idleThresholdCount = 20;
 var idlenessCheckerLastTime = 0;
@@ -128,6 +213,7 @@ function requestContent(request, done) {
     // log(request.request.url + ' (' + (bytes && bytes.length) + ' bytes) getContent took ' + (Date.now() - start) + 'ms');
     function sendEvent(sha1) {
       var ev = {
+        type: 'request',
         url: request.request.url,
         method: request.request.method,
         mimeType: request.response.content.mimeType,
@@ -139,6 +225,7 @@ function requestContent(request, done) {
         ev.sha1 = sha1;
       }
       // log(ev);
+      postMessage(ev)
     }
     done();
     if (bytes != null) {
@@ -156,6 +243,10 @@ function requestContent(request, done) {
 }
 
 chrome.devtools.network.onRequestFinished.addListener(function(request) {
+  if (request.request.url.match(/^data\:/)) {
+    // log('ignoring data url: ' + request.request.url);
+    return;
+  }
   // Process the request after a delay so as to avoid causing delays during
   // page load/render.
   queueOnIdle(requestContent.bind(null, request));
