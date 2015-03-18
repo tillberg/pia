@@ -1,12 +1,15 @@
 
+var reconnectPortEveryMs = 1000;
 var port;
 function onDisconnect() {
+  log('disconnected');
   port = null;
 }
 function onMessage(ev) {
   if (ev.type === 'check_sha1') {
     var sha1 = ev.sha1;
     if (hashCheckQueue[sha1] != null) {
+      log('check_sha1 ' + btoa(sha1) + ' ' + (ev.isHit ? 'hit' : 'miss'));
       if (!ev.isHit) {
         uploadQueue[sha1] = hashCheckQueue[sha1];
         ensureUploaderTimeout();
@@ -19,9 +22,18 @@ function onMessage(ev) {
 }
 function postMessage(msg) {
   if (!port) {
+    // log('new port');
     port = chrome.runtime.connect({name: "devtools-page"});
     port.onMessage.addListener(onMessage);
     port.onDisconnect.addListener(onDisconnect);
+    setTimeout(function () {
+      var _port = port;
+      port = null;
+      setTimeout(function () {
+        // log('disconnect');
+        _port.disconnect();
+      }, 2000); // allow for in-flight responses to come back
+    }, reconnectPortEveryMs);
   }
   // How do we know that msg gets received?
   port.postMessage(msg);
@@ -84,28 +96,15 @@ function ensureUploaderTimeout() {
   }
 }
 
-// This serves to clean up any hashes where we for one reason or another
-// might miss the check_sha1 response for a request we made:
-var hashCheckerTimeout;
-function hashChecker() {
-  hashCheckerTimeout = null;
-  for (var sha1 in hashCheckQueue) {
-    sendHashCheck(sha1);
-    ensureHashCheckerTimeout();
-  }
-}
-function ensureHashCheckerTimeout() {
-  if (!hashCheckerTimeout) {
-    hashCheckerTimeout = setTimeout(hashChecker, 1000);
-  }
-}
-
 function sendHashCheck(sha1) {
-  // log('check_sha1 ' + btoa(sha1));
-  postMessage({
-    type: 'check_sha1',
-    sha1: sha1,
-  });
+  if (hashCheckQueue[sha1] != null) {
+    // log('send check_sha1 ' + btoa(sha1));
+    postMessage({
+      type: 'check_sha1',
+      sha1: sha1,
+    });
+    setTimeout(sendHashCheck.bind(null, sha1), 1000);
+  }
 }
 
 function queueUpload(bytes, cb) {
@@ -113,7 +112,6 @@ function queueUpload(bytes, cb) {
   // log('queueing upload of ' + btoa(hash) + ' - ' + bytes.length + ' bytes.');
   hashCheckQueue[sha1] = bytes;
   sendHashCheck(sha1);
-  ensureHashCheckerTimeout();
   cb(sha1);
 }
 
@@ -209,36 +207,52 @@ function queueOnIdle(cb) {
 function requestContent(request, done) {
   var start = Date.now();
   request.getContent(function getContent(content, encoding) {
-    var bytes = content != null && encoding === 'base64' ? atob(content) : content;
+    var postData = request.request.postData;
+    var reqBytes = postData && postData.text;
+    var respBytes = content != null && encoding === 'base64' ? atob(content) : content;
+
     // log(request.request.url + ' (' + (bytes && bytes.length) + ' bytes) getContent took ' + (Date.now() - start) + 'ms');
-    function sendEvent(sha1) {
+    var reqSha1;
+    var respSha1;
+    function sendEvent() {
       var ev = {
         type: 'request',
         url: request.request.url,
         method: request.request.method,
-        mimeType: request.response.content.mimeType,
         status: request.response.status,
         latency: Math.round(request.time),
         startTime: new Date(request.startedDateTime).getTime(),
+        reqMimeType: postData && postData.mimeType,
+        reqBody: reqSha1,
+        respMimeType: request.response.content.mimeType,
+        respBody: respSha1,
       };
-      if (sha1) {
-        ev.sha1 = sha1;
-      }
-      // log(ev);
-      postMessage(ev)
+      log(ev);
+      postMessage(ev);
     }
     done();
-    if (bytes != null) {
-      queueOnIdle(function(done) {
-        done();
-        uploadBytes(blobPrefix + bytes, function(sha1) {
-          // log('totalHashTime: ' + totalHashTime);
-          sendEvent(sha1);
+    function processReqBody(done) {
+      if (reqBytes != null) {
+        uploadBytes(blobPrefix + reqBytes, function(sha1) {
+          reqSha1 = sha1;
+          sendEvent();
         });
-      })
-    } else {
-      sendEvent(null);
+      } else {
+        sendEvent();
+      }
     }
+    function processRespBody(done) {
+      done();
+      if (respBytes != null) {
+        uploadBytes(blobPrefix + respBytes, function(sha1) {
+          respSha1 = sha1;
+          processReqBody();
+        });
+      } else {
+        processReqBody();
+      }
+    }
+    queueOnIdle(processRespBody);
   });
 }
 
