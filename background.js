@@ -1,19 +1,4 @@
-var num = 0;
-
-function log(s) {
-  var div = document.createElement('div');
-  var nowStr = new Date().toISOString().slice(0, -1);
-  div.innerHTML = nowStr + ' ' + s;
-  div.style.whiteSpace = 'nowrap';
-  document.body.appendChild(div);
-  num++;
-  if (num > 30) {
-    document.body.querySelectorAll('div')[0].remove();
-  }
-}
-
-var cacheSizeEl = document.createElement('h3');
-document.body.appendChild(cacheSizeEl);
+var log = console.log.bind(console);
 
 // var requestFilter = {
 //   urls: [ "<all_urls>" ]
@@ -42,12 +27,13 @@ var numReqs = 0;
 
 function updateStats() {
   var text = [
+    '',
     'blocks: ' + cachedSha1s.size,
-    ', bytes: ' + bytesUploaded,
-    ', reqs: ' + numReqs,
-  ].join('');
-  // console.log(text);
-  cacheSizeEl.innerHTML = text;
+    'bytes: ' + bytesUploaded,
+    'reqs: ' + numReqs,
+    '',
+  ].join('\n');
+  document.body.innerHTML = text;
 }
 
 chrome.runtime.onConnect.addListener(function(port) {
