@@ -206,6 +206,15 @@ function queueOnIdle(cb) {
 
 function requestContent(request, done) {
   var start = Date.now();
+  var headers = {};
+  for (var i = 0; i < request.request.headers.length; i++) {
+    var header = request.request.headers[i];
+    headers[header.name] = header.value;
+  }
+  if (headers.Origin && headers.Origin.match(/^chrome-extension/)) {
+    log('ignoring request by chrome-extension');
+    return;
+  }
   request.getContent(function getContent(content, encoding) {
     var postData = request.request.postData;
     var reqBytes = postData && postData.text;

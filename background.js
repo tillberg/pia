@@ -36,6 +36,29 @@ function updateStats() {
   document.body.innerHTML = text;
 }
 
+var serverUrl = 'http://localhost:8430/';
+
+function queueUpload(sha1, bytes) {
+  cachedSha1s.add(sha1);
+  var numBytes = bytes.length;
+  bytesUploaded += numBytes;
+  var summaryStr = btoa(sha1) + ' (' + numBytes + ' bytes)';
+  var request = new XMLHttpRequest();
+  request.open('POST', serverUrl, true);
+  request.setRequestHeader('Content-Type', 'application/octet-stream');
+  request.onload = function() {
+    if (request.status >= 200 && request.status < 400) {
+      log('Uploaded ' + summaryStr);
+    } else {
+      console.error('Error POSTing ' + summaryStr + ' to ' + serverUrl);
+    }
+  };
+  request.onerror = function() {
+    console.error('Error POSTing ' + summaryStr + ' to ' + serverUrl);
+  };
+  request.send(bytes);
+}
+
 chrome.runtime.onConnect.addListener(function(port) {
   // log('new connection');
   port.onMessage.addListener(function(ev) {
@@ -56,10 +79,7 @@ chrome.runtime.onConnect.addListener(function(port) {
         isHit: isHit,
       });
     } else if (ev.type === 'upload') {
-      cachedSha1s.add(sha1);
-      var numBytes = ev.bytes.length;
-      bytesUploaded += numBytes;
-      log('saved ' + sha1Str + ' (' + numBytes + ' bytes)');
+      queueUpload(sha1, ev.bytes);
     } else {
       log('unknown event type: ' + ev.type);
     }
